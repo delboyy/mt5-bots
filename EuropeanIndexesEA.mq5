@@ -1,43 +1,53 @@
 //+------------------------------------------------------------------+
 //|                                          EuropeanIndexesEA.mq5   |
 //|                        European Indexes Asia-London Range EA     |
-//|                                                                  |
+//|                                   Refactored for Production Use  |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Trading Bot"
 #property link      ""
-#property version   "1.00"
+#property version   "2.00"
 #property description "Asia-London Range Breakout Reversal Strategy"
 #property description "Fades breakouts from Asia session range during London session"
+#property description "Supports single-symbol (default) and multi-symbol modes"
 
 #include <Trade\Trade.mqh>
 
-//--- Input parameters
-input group "=== Trading Symbols ==="
-input string Symbol1 = "GER40";     // Symbol 1 (DAX)
-input string Symbol2 = "FRA40";     // Symbol 2 (CAC40)
-input string Symbol3 = "UK100";     // Symbol 3 (FTSE)
-input string Symbol4 = "EUSTX50";   // Symbol 4 (Euro STOXX)
+//+------------------------------------------------------------------+
+//| INPUT PARAMETERS                                                  |
+//+------------------------------------------------------------------+
 
-input group "=== Session Times (Dubai GMT+4) ==="
-input int AsiaStartHour = 5;        // Asia Session Start Hour
-input int AsiaEndHour = 9;          // Asia Session End Hour
-input int LondonStartHour = 11;     // London Session Start Hour
-input int LondonEndHour = 14;       // London Session End Hour
+input group "=== SYMBOL MODE ==="
+input bool EnableMultiSymbol = false;     // Enable Multi-Symbol Trading
+input string SymbolOverride = "";         // Symbol Override (single mode only)
 
-input group "=== Risk Management ==="
-input double LotSize = 0.01;        // Position Size (Lots)
-input double StopLossPct = 1.5;     // Stop Loss (% of Asia Range)
-input double MaxRiskPerTrade = 0.02; // Max Risk Per Trade (2%)
-input double MaxDailyRisk = 0.05;   // Max Daily Risk (5%)
+input group "=== MULTI-SYMBOL SETTINGS (if enabled) ==="
+input string Symbol1 = "GER40";           // Symbol 1 (DAX)
+input string Symbol2 = "FRA40";           // Symbol 2 (CAC40)
+input string Symbol3 = "UK100";           // Symbol 3 (FTSE)
+input string Symbol4 = "EUSTX50";         // Symbol 4 (Euro STOXX)
 
-input group "=== EA Settings ==="
-input int MagicNumber = 234000;     // Magic Number
-input int Slippage = 10;            // Slippage (points)
-input bool EnableLogging = true;    // Enable Detailed Logging
+input group "=== SESSION TIMES (Dubai GMT+4) ==="
+input int AsiaStartHour = 5;              // Asia Session Start Hour
+input int AsiaEndHour = 9;                // Asia Session End Hour
+input int LondonStartHour = 11;           // London Session Start Hour
+input int LondonEndHour = 14;             // London Session End Hour
 
-//--- Global variables
+input group "=== RISK MANAGEMENT ==="
+input double RiskPercent = 1.0;           // Risk % Per Trade
+input double MaxLots = 5.0;               // Maximum Lot Size (safety limit)
+input double StopLossPct = 1.5;           // Stop Loss (% of Asia Range)
+
+input group "=== EA SETTINGS ==="
+input int MagicNumber = 234000;           // Magic Number
+input int Slippage = 10;                  // Slippage (points)
+input bool EnableLogging = true;          // Enable Detailed Logging
+
+//+------------------------------------------------------------------+
+//| GLOBAL VARIABLES                                                  |
+//+------------------------------------------------------------------+
+
 CTrade trade;
-string symbols[4];
+string tradingSymbols[];
 int symbolCount = 0;
 
 // Asia range data structure
@@ -49,26 +59,16 @@ struct AsiaRange {
    bool identified;
 };
 
-AsiaRange asiaRanges[4];  // One for each symbol
-
 // Trade tracking structure
 struct TradeInfo {
-   bool active;
-   string direction;
-   double entryPrice;
-   double targetPrice;
-   double stopLoss;
-   datetime entryTime;
-   ulong ticket;
+   bool tradedToday;
+   datetime lastTradeDate;
 };
 
-TradeInfo currentTrades[4];  // One for each symbol
+// Symbol-specific data
+AsiaRange asiaRanges[];
+TradeInfo tradeTracking[];
 
-// Daily tracking
-double dailyRiskUsed = 0.0;
-int tradesTotal = 0;
-int tradesWon = 0;
-double dailyPnL = 0.0;
 datetime lastResetDate = 0;
 
 // Session enum
@@ -83,9 +83,9 @@ enum SESSION_TYPE {
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit() {
-   Print("========================================");
-   Print("European Indexes Asia-London Range EA");
-   Print("========================================");
+   PrintFormat("========================================");
+   PrintFormat("European Indexes Asia-London Range EA v2.0");
+   PrintFormat("========================================");
    
    // Initialize trade object
    trade.SetExpertMagicNumber(MagicNumber);
@@ -93,34 +93,27 @@ int OnInit() {
    trade.SetTypeFilling(ORDER_FILLING_IOC);
    trade.SetAsyncMode(false);
    
-   // Build symbols array
-   symbolCount = 0;
-   if(Symbol1 != "") symbols[symbolCount++] = Symbol1;
-   if(Symbol2 != "") symbols[symbolCount++] = Symbol2;
-   if(Symbol3 != "") symbols[symbolCount++] = Symbol3;
-   if(Symbol4 != "") symbols[symbolCount++] = Symbol4;
-   
-   Print("Trading ", symbolCount, " symbols:");
-   for(int i = 0; i < symbolCount; i++) {
-      Print("  - ", symbols[i]);
-      
-      // Verify symbol exists
-      if(!SymbolSelect(symbols[i], true)) {
-         Print("ERROR: Symbol ", symbols[i], " not found!");
-         return INIT_FAILED;
-      }
-      
-      // Initialize structures
-      asiaRanges[i].identified = false;
-      currentTrades[i].active = false;
+   // Build symbols array based on mode
+   if(!BuildSymbolsList()) {
+      return INIT_FAILED;
    }
    
-   Print("Stop Loss: ", StopLossPct * 100, "% of Asia range");
-   Print("Max Risk/Trade: ", MaxRiskPerTrade * 100, "%");
-   Print("Max Daily Risk: ", MaxDailyRisk * 100, "%");
-   Print("========================================");
+   // Initialize arrays
+   ArrayResize(asiaRanges, symbolCount);
+   ArrayResize(tradeTracking, symbolCount);
    
-   // Initialize daily reset
+   for(int i = 0; i < symbolCount; i++) {
+      asiaRanges[i].identified = false;
+      tradeTracking[i].tradedToday = false;
+      tradeTracking[i].lastTradeDate = 0;
+   }
+   
+   PrintFormat("Risk Management: %.1f%% per trade (Max: %.2f lots)", RiskPercent, MaxLots);
+   PrintFormat("Stop Loss: %.0f%% of Asia range", StopLossPct * 100);
+   PrintFormat("Session Times: Asia %d-%d, London %d-%d (Dubai GMT+4)", 
+               AsiaStartHour, AsiaEndHour, LondonStartHour, LondonEndHour);
+   PrintFormat("========================================");
+   
    lastResetDate = TimeCurrent();
    
    return INIT_SUCCEEDED;
@@ -130,14 +123,9 @@ int OnInit() {
 //| Expert deinitialization function                                 |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
-   Print("========================================");
-   Print("EA Shutdown - Reason: ", reason);
-   Print("Daily Summary:");
-   Print("  Trades: ", tradesTotal);
-   Print("  Wins: ", tradesWon);
-   Print("  Win Rate: ", (tradesTotal > 0 ? (tradesWon * 100.0 / tradesTotal) : 0), "%");
-   Print("  Daily P&L: ", dailyPnL);
-   Print("========================================");
+   PrintFormat("========================================");
+   PrintFormat("EA Shutdown - Reason: %d", reason);
+   PrintFormat("========================================");
 }
 
 //+------------------------------------------------------------------+
@@ -171,6 +159,66 @@ void OnTick() {
 }
 
 //+------------------------------------------------------------------+
+//| Build list of symbols to trade                                   |
+//+------------------------------------------------------------------+
+bool BuildSymbolsList() {
+   ArrayFree(tradingSymbols);
+   symbolCount = 0;
+   
+   if(EnableMultiSymbol) {
+      // Multi-symbol mode
+      PrintFormat("Mode: MULTI-SYMBOL");
+      
+      string symbols[] = {Symbol1, Symbol2, Symbol3, Symbol4};
+      
+      for(int i = 0; i < ArraySize(symbols); i++) {
+         if(symbols[i] == "") continue;
+         
+         // Try to select symbol
+         if(!SymbolSelect(symbols[i], true)) {
+            PrintFormat("WARNING: Symbol %s not found - skipping", symbols[i]);
+            continue;
+         }
+         
+         // Verify symbol is tradeable
+         if(!SymbolInfoInteger(symbols[i], SYMBOL_TRADE_MODE)) {
+            PrintFormat("WARNING: Symbol %s not tradeable - skipping", symbols[i]);
+            continue;
+         }
+         
+         // Add to trading list
+         ArrayResize(tradingSymbols, symbolCount + 1);
+         tradingSymbols[symbolCount] = symbols[i];
+         symbolCount++;
+         PrintFormat("  ✓ %s added", symbols[i]);
+      }
+      
+      if(symbolCount == 0) {
+         PrintFormat("ERROR: No valid symbols found in multi-symbol mode!");
+         return false;
+      }
+   }
+   else {
+      // Single-symbol mode
+      PrintFormat("Mode: SINGLE-SYMBOL");
+      
+      string symbol = (SymbolOverride != "") ? SymbolOverride : _Symbol;
+      
+      if(!SymbolSelect(symbol, true)) {
+         PrintFormat("ERROR: Symbol %s not found!", symbol);
+         return false;
+      }
+      
+      ArrayResize(tradingSymbols, 1);
+      tradingSymbols[0] = symbol;
+      symbolCount = 1;
+      PrintFormat("  ✓ Trading: %s", symbol);
+   }
+   
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| Check if new day and reset daily variables                       |
 //+------------------------------------------------------------------+
 void CheckDailyReset() {
@@ -178,23 +226,18 @@ void CheckDailyReset() {
    TimeToStruct(TimeCurrent(), currentTime);
    TimeToStruct(lastResetDate, lastTime);
    
-   // Reset at midnight Dubai time (adjust for GMT+4)
    if(currentTime.day != lastTime.day) {
-      if(EnableLogging) Print("=== DAILY RESET ===");
+      if(EnableLogging) PrintFormat("=== DAILY RESET ===");
       
-      dailyRiskUsed = 0.0;
-      tradesTotal = 0;
-      tradesWon = 0;
-      dailyPnL = 0.0;
-      
-      // Clear Asia ranges
+      // Clear Asia ranges and trade tracking
       for(int i = 0; i < symbolCount; i++) {
          asiaRanges[i].identified = false;
+         tradeTracking[i].tradedToday = false;
       }
       
       lastResetDate = TimeCurrent();
       
-      if(EnableLogging) Print("Daily state reset complete");
+      if(EnableLogging) PrintFormat("Daily state reset complete");
    }
 }
 
@@ -233,11 +276,11 @@ void ProcessAsiaSession() {
    if(TimeCurrent() - lastCheck < 300) return;
    lastCheck = TimeCurrent();
    
-   if(EnableLogging) Print("=== ASIA SESSION - Monitoring ranges ===");
+   if(EnableLogging) PrintFormat("=== ASIA SESSION - Monitoring ranges ===");
    
    for(int i = 0; i < symbolCount; i++) {
       if(!asiaRanges[i].identified) {
-         IdentifyAsiaRange(i);
+         CalculateAsiaRange(i);
       }
    }
 }
@@ -252,11 +295,11 @@ void ProcessPreLondonSession() {
    if(TimeCurrent() - lastCheck < 300) return;
    lastCheck = TimeCurrent();
    
-   if(EnableLogging) Print("=== PRE-LONDON - Finalizing ranges ===");
+   if(EnableLogging) PrintFormat("=== PRE-LONDON - Finalizing ranges ===");
    
    for(int i = 0; i < symbolCount; i++) {
       if(!asiaRanges[i].identified) {
-         IdentifyAsiaRange(i);
+         CalculateAsiaRange(i);
       }
    }
 }
@@ -272,14 +315,17 @@ void ProcessLondonSession() {
    lastCheck = TimeCurrent();
    
    for(int i = 0; i < symbolCount; i++) {
-      // Manage existing positions
-      if(currentTrades[i].active) {
-         ManagePosition(i);
-      }
-      // Look for new trades
-      else if(asiaRanges[i].identified) {
-         CheckForBreakout(i);
-      }
+      // Skip if already traded today
+      if(tradeTracking[i].tradedToday) continue;
+      
+      // Skip if range not identified
+      if(!asiaRanges[i].identified) continue;
+      
+      // Skip if already have open position
+      if(CountOpenPositionsForSymbol(tradingSymbols[i]) > 0) continue;
+      
+      // Check for entry signal
+      CheckForEntrySignal(i);
    }
 }
 
@@ -291,12 +337,10 @@ void ProcessClosedSession() {
    
    // Close all positions once when session closes
    if(!closedToday) {
-      if(EnableLogging) Print("=== LONDON SESSION ENDED - Closing positions ===");
+      if(EnableLogging) PrintFormat("=== LONDON SESSION ENDED - Closing positions ===");
       
       for(int i = 0; i < symbolCount; i++) {
-         if(currentTrades[i].active) {
-            ClosePosition(i, "TIME_EXIT");
-         }
+         CloseAllPositionsForSymbol(tradingSymbols[i], "TIME_EXIT");
       }
       
       closedToday = true;
@@ -314,18 +358,18 @@ void ProcessClosedSession() {
 }
 
 //+------------------------------------------------------------------+
-//| Identify Asia session range for a symbol                         |
+//| Calculate Asia session range for a symbol                        |
 //+------------------------------------------------------------------+
-void IdentifyAsiaRange(int symbolIndex) {
-   string symbol = symbols[symbolIndex];
+void CalculateAsiaRange(int symbolIndex) {
+   string symbol = tradingSymbols[symbolIndex];
    
-   // Get current time in Dubai timezone
+   // Get current time
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
    
-   // Calculate Asia session start/end times
+   // Calculate Asia session start/end times (convert Dubai to GMT)
    datetime asiaStart = StringToTime(StringFormat("%04d.%02d.%02d %02d:00", 
-                                      dt.year, dt.mon, dt.day, AsiaStartHour - 4)); // Adjust for GMT
+                                      dt.year, dt.mon, dt.day, AsiaStartHour - 4));
    datetime asiaEnd = StringToTime(StringFormat("%04d.%02d.%02d %02d:00", 
                                     dt.year, dt.mon, dt.day, AsiaEndHour - 4));
    
@@ -336,7 +380,7 @@ void IdentifyAsiaRange(int symbolIndex) {
    int copied = CopyRates(symbol, PERIOD_M5, asiaStart, asiaEnd, rates);
    
    if(copied < 3) {
-      if(EnableLogging) Print(symbol, ": Insufficient Asia data (", copied, " bars)");
+      if(EnableLogging) PrintFormat("%s: Insufficient Asia data (%d bars)", symbol, copied);
       return;
    }
    
@@ -352,8 +396,9 @@ void IdentifyAsiaRange(int symbolIndex) {
    double rangeSize = high - low;
    
    // Validate range (minimum 5 points)
-   if(rangeSize < 5.0 * SymbolInfoDouble(symbol, SYMBOL_POINT)) {
-      if(EnableLogging) Print(symbol, ": Range too small (", rangeSize, ")");
+   double minRange = 5.0 * SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(rangeSize < minRange) {
+      if(EnableLogging) PrintFormat("%s: Range too small (%.5f)", symbol, rangeSize);
       return;
    }
    
@@ -365,18 +410,16 @@ void IdentifyAsiaRange(int symbolIndex) {
    asiaRanges[symbolIndex].identified = true;
    
    if(EnableLogging) {
-      Print("✓ ", symbol, " Asia Range: ", 
-            DoubleToString(low, _Digits), " - ", 
-            DoubleToString(high, _Digits), 
-            " (Size: ", DoubleToString(rangeSize, _Digits), ")");
+      PrintFormat("✓ %s Asia Range: %.5f - %.5f (Size: %.5f)", 
+                  symbol, low, high, rangeSize);
    }
 }
 
 //+------------------------------------------------------------------+
-//| Check for breakout and place order                               |
+//| Check for entry signal and place order                           |
 //+------------------------------------------------------------------+
-void CheckForBreakout(int symbolIndex) {
-   string symbol = symbols[symbolIndex];
+void CheckForEntrySignal(int symbolIndex) {
+   string symbol = tradingSymbols[symbolIndex];
    
    // Get current price
    double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
@@ -393,7 +436,8 @@ void CheckForBreakout(int symbolIndex) {
       entryPrice = bid;
       
       if(EnableLogging) {
-         Print(symbol, " breakout ABOVE: ", bid, " > ", range.high, " - Going SHORT");
+         PrintFormat("%s breakout ABOVE: %.5f > %.5f - Going SHORT", 
+                     symbol, bid, range.high);
       }
    }
    // Check for breakout BELOW (fade with LONG)
@@ -402,7 +446,8 @@ void CheckForBreakout(int symbolIndex) {
       entryPrice = ask;
       
       if(EnableLogging) {
-         Print(symbol, " breakout BELOW: ", ask, " < ", range.low, " - Going LONG");
+         PrintFormat("%s breakout BELOW: %.5f < %.5f - Going LONG", 
+                     symbol, ask, range.low);
       }
    }
    
@@ -413,134 +458,163 @@ void CheckForBreakout(int symbolIndex) {
 }
 
 //+------------------------------------------------------------------+
-//| Place order with SL and TP                                       |
+//| Calculate SL and TP levels                                       |
 //+------------------------------------------------------------------+
-void PlaceOrder(int symbolIndex, string direction, double entryPrice) {
-   string symbol = symbols[symbolIndex];
-   AsiaRange range = asiaRanges[symbolIndex];
-   
-   // Calculate target and stop
-   double targetPrice, stopLoss;
+void CalculateSLTP(string symbol, string direction, double entryPrice, 
+                   AsiaRange &range, double &stopLoss, double &takeProfit) {
    
    if(direction == "LONG") {
-      targetPrice = range.high;
+      takeProfit = range.high;
       stopLoss = entryPrice - (range.size * StopLossPct);
    }
    else { // SHORT
-      targetPrice = range.low;
+      takeProfit = range.low;
       stopLoss = entryPrice + (range.size * StopLossPct);
-   }
-   
-   // Check risk limit
-   double stopDistance = MathAbs(entryPrice - stopLoss);
-   double riskThisTrade = LotSize * stopDistance / SymbolInfoDouble(symbol, SYMBOL_POINT);
-   
-   if(dailyRiskUsed + riskThisTrade > MaxDailyRisk) {
-      if(EnableLogging) Print(symbol, ": Daily risk limit reached");
-      return;
    }
    
    // Normalize prices
    int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-   targetPrice = NormalizeDouble(targetPrice, digits);
    stopLoss = NormalizeDouble(stopLoss, digits);
+   takeProfit = NormalizeDouble(takeProfit, digits);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lot size based on risk percentage                      |
+//+------------------------------------------------------------------+
+double CalculateLotSizeBasedOnRisk(string symbol, double entryPrice, double stopLoss) {
+   // Calculate SL distance in points
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double slPoints = MathAbs(entryPrice - stopLoss) / point;
+   
+   if(slPoints <= 0) {
+      PrintFormat("ERROR: Invalid SL distance for %s", symbol);
+      return 0;
+   }
+   
+   // Get tick value
+   double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(tickValue <= 0) {
+      PrintFormat("ERROR: Invalid tick value for %s", symbol);
+      return 0;
+   }
+   
+   // Calculate monetary risk
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskMoney = balance * (RiskPercent / 100.0);
+   
+   // Calculate lot size
+   double lots = riskMoney / (slPoints * tickValue);
+   
+   // Get volume step and limits
+   double volumeStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   double minVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   double maxVolume = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+   
+   // Normalize to volume step
+   lots = MathFloor(lots / volumeStep) * volumeStep;
+   
+   // Apply limits
+   if(lots < minVolume) lots = minVolume;
+   if(lots > maxVolume) lots = maxVolume;
+   if(lots > MaxLots) lots = MaxLots;
+   
+   // Final normalization
+   lots = NormalizeDouble(lots, 2);
+   
+   if(EnableLogging) {
+      PrintFormat("%s: Risk=%.2f%% (%.2f), SL=%.1f pts, Lot=%.2f", 
+                  symbol, RiskPercent, riskMoney, slPoints, lots);
+   }
+   
+   return lots;
+}
+
+//+------------------------------------------------------------------+
+//| Place order with SL and TP                                       |
+//+------------------------------------------------------------------+
+void PlaceOrder(int symbolIndex, string direction, double entryPrice) {
+   string symbol = tradingSymbols[symbolIndex];
+   AsiaRange range = asiaRanges[symbolIndex];
+   
+   // Calculate SL and TP
+   double stopLoss, takeProfit;
+   CalculateSLTP(symbol, direction, entryPrice, range, stopLoss, takeProfit);
+   
+   // Calculate lot size based on risk
+   double lots = CalculateLotSizeBasedOnRisk(symbol, entryPrice, stopLoss);
+   
+   if(lots <= 0) {
+      PrintFormat("ERROR: Invalid lot size for %s", symbol);
+      return;
+   }
+   
+   // Normalize entry price
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
    entryPrice = NormalizeDouble(entryPrice, digits);
    
    // Place order
    bool result = false;
    
    if(direction == "LONG") {
-      result = trade.Buy(LotSize, symbol, entryPrice, stopLoss, targetPrice, "Asia-London Range");
+      result = trade.Buy(lots, symbol, entryPrice, stopLoss, takeProfit, "Asia-London Range");
    }
    else {
-      result = trade.Sell(LotSize, symbol, entryPrice, stopLoss, targetPrice, "Asia-London Range");
+      result = trade.Sell(lots, symbol, entryPrice, stopLoss, takeProfit, "Asia-London Range");
    }
    
    if(result) {
       if(EnableLogging) {
-         Print("✅ ", symbol, " order placed: ", direction, " ", LotSize, " lots @ ", entryPrice);
-         Print("   Target: ", targetPrice, " | Stop: ", stopLoss);
+         PrintFormat("✅ %s order placed: %s %.2f lots @ %.5f", 
+                     symbol, direction, lots, entryPrice);
+         PrintFormat("   Target: %.5f | Stop: %.5f", takeProfit, stopLoss);
       }
       
-      // Store trade info
-      currentTrades[symbolIndex].active = true;
-      currentTrades[symbolIndex].direction = direction;
-      currentTrades[symbolIndex].entryPrice = entryPrice;
-      currentTrades[symbolIndex].targetPrice = targetPrice;
-      currentTrades[symbolIndex].stopLoss = stopLoss;
-      currentTrades[symbolIndex].entryTime = TimeCurrent();
-      currentTrades[symbolIndex].ticket = trade.ResultOrder();
-      
-      dailyRiskUsed += riskThisTrade;
-      tradesTotal++;
+      // Mark as traded today
+      tradeTracking[symbolIndex].tradedToday = true;
+      tradeTracking[symbolIndex].lastTradeDate = TimeCurrent();
    }
    else {
-      Print("❌ ", symbol, " order failed: ", trade.ResultRetcodeDescription());
+      PrintFormat("❌ %s order failed: %s", symbol, trade.ResultRetcodeDescription());
    }
 }
 
 //+------------------------------------------------------------------+
-//| Manage open position                                             |
+//| Count open positions for a symbol                                |
 //+------------------------------------------------------------------+
-void ManagePosition(int symbolIndex) {
-   string symbol = symbols[symbolIndex];
+int CountOpenPositionsForSymbol(string symbol) {
+   int count = 0;
    
-   // Check if position still exists
-   if(!PositionSelect(symbol)) {
-      // Position closed (hit TP/SL)
-      TradeInfo trade = currentTrades[symbolIndex];
-      
-      // Calculate P&L (approximate)
-      double pnl = 0;
-      if(trade.direction == "LONG") {
-         pnl = (trade.targetPrice - trade.entryPrice) * LotSize;
+   for(int i = 0; i < PositionsTotal(); i++) {
+      if(PositionGetSymbol(i) == symbol) {
+         if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+            count++;
+         }
       }
-      else {
-         pnl = (trade.entryPrice - trade.targetPrice) * LotSize;
-      }
-      
-      if(pnl > 0) tradesWon++;
-      dailyPnL += pnl;
-      
-      if(EnableLogging) {
-         Print("📊 TRADE CLOSED: ", symbol, " ", trade.direction, 
-               " | Entry: ", trade.entryPrice, " | P&L: ", pnl, " | Reason: TP/SL Hit");
-      }
-      
-      currentTrades[symbolIndex].active = false;
    }
+   
+   return count;
 }
 
 //+------------------------------------------------------------------+
-//| Close position manually                                          |
+//| Close all positions for a symbol                                 |
 //+------------------------------------------------------------------+
-void ClosePosition(int symbolIndex, string reason) {
-   string symbol = symbols[symbolIndex];
-   
-   if(!PositionSelect(symbol)) {
-      currentTrades[symbolIndex].active = false;
-      return;
-   }
-   
-   TradeInfo tradeInfo = currentTrades[symbolIndex];
-   
-   if(trade.PositionClose(symbol)) {
-      double closePrice = PositionGetDouble(POSITION_PRICE_CURRENT);
-      double pnl = PositionGetDouble(POSITION_PROFIT);
-      
-      if(pnl > 0) tradesWon++;
-      dailyPnL += pnl;
-      
-      if(EnableLogging) {
-         Print("📊 TRADE CLOSED: ", symbol, " ", tradeInfo.direction, 
-               " | Entry: ", tradeInfo.entryPrice, " | Exit: ", closePrice,
-               " | P&L: ", pnl, " | Reason: ", reason);
+void CloseAllPositionsForSymbol(string symbol, string reason) {
+   for(int i = PositionsTotal() - 1; i >= 0; i--) {
+      if(PositionGetSymbol(i) == symbol) {
+         if(PositionGetInteger(POSITION_MAGIC) == MagicNumber) {
+            ulong ticket = PositionGetInteger(POSITION_TICKET);
+            
+            if(trade.PositionClose(ticket)) {
+               if(EnableLogging) {
+                  PrintFormat("📊 CLOSED: %s | Reason: %s | P&L: %.2f", 
+                              symbol, reason, PositionGetDouble(POSITION_PROFIT));
+               }
+            }
+            else {
+               PrintFormat("❌ Failed to close %s: %s", symbol, trade.ResultRetcodeDescription());
+            }
+         }
       }
-      
-      currentTrades[symbolIndex].active = false;
-   }
-   else {
-      Print("❌ Failed to close ", symbol, ": ", trade.ResultRetcodeDescription());
    }
 }
 
