@@ -1,14 +1,14 @@
 //+------------------------------------------------------------------+
-//|                                          EuropeanIndexesEA.mq5   |
-//|                        European Indexes Asia-London Range EA     |
-//|                                   Refactored for Production Use  |
+//|                                              USMarketsEA.mq5      |
+//|                           US Markets Asia-London Range EA        |
+//|                                   For SPY and US Indexes          |
 //+------------------------------------------------------------------+
 #property copyright "MT5 Trading Bot"
 #property link      ""
 #property version   "2.00"
-#property description "Asia-London Range Breakout Reversal Strategy"
-#property description "Fades breakouts from Asia session range during London session"
-#property description "Supports single-symbol (default) and multi-symbol modes"
+#property description "Asia-London Range Breakout Reversal Strategy for US Markets"
+#property description "Fades breakouts from Asia session range during US market hours"
+#property description "Closes positions 1 minute before US market close"
 
 #include <Trade\Trade.mqh>
 
@@ -21,16 +21,18 @@ input bool EnableMultiSymbol = false;     // Enable Multi-Symbol Trading
 input string SymbolOverride = "";         // Symbol Override (single mode only)
 
 input group "=== MULTI-SYMBOL SETTINGS (if enabled) ==="
-input string Symbol1 = "GER40";           // Symbol 1 (DAX)
-input string Symbol2 = "FRA40";           // Symbol 2 (CAC40)
-input string Symbol3 = "UK100";           // Symbol 3 (FTSE)
-input string Symbol4 = "EUSTX50";         // Symbol 4 (Euro STOXX)
+input string Symbol1 = "SPY";             // Symbol 1 (S&P 500 ETF)
+input string Symbol2 = "QQQ";             // Symbol 2 (Nasdaq ETF)
+input string Symbol3 = "DIA";             // Symbol 3 (Dow Jones ETF)
+input string Symbol4 = "IWM";             // Symbol 4 (Russell 2000 ETF)
 
-input group "=== SESSION TIMES (Dubai GMT+4) ==="
+input group "=== SESSION TIMES (Eastern Time) ==="
 input int AsiaStartHour = 5;              // Asia Session Start Hour (Dubai)
 input int AsiaEndHour = 9;                // Asia Session End Hour (Dubai)
-input int LondonStartHour = 11;           // London Session Start Hour (Dubai)
-input int LondonEndHour = 17;             // London Session End Hour (Dubai) - Extended to 5pm
+input int USMarketOpenHour = 9;           // US Market Open Hour (ET) - 9:30am
+input int USMarketOpenMinute = 30;        // US Market Open Minute
+input int USMarketCloseHour = 15;         // US Market Close Hour (ET) - 4:00pm
+input int USMarketCloseMinute = 59;       // Close positions at 3:59pm (1 min before close)
 
 input group "=== RISK MANAGEMENT ==="
 input double RiskPercent = 1.0;           // Risk % Per Trade
@@ -38,7 +40,7 @@ input double MaxLots = 5.0;               // Maximum Lot Size (safety limit)
 input double StopLossPct = 1.5;           // Stop Loss (% of Asia Range)
 
 input group "=== EA SETTINGS ==="
-input int MagicNumber = 234000;           // Magic Number
+input int MagicNumber = 234001;           // Magic Number (different from European EA)
 input int Slippage = 10;                  // Slippage (points)
 input bool EnableLogging = true;          // Enable Detailed Logging
 
@@ -74,8 +76,8 @@ datetime lastResetDate = 0;
 // Session enum
 enum SESSION_TYPE {
    SESSION_ASIA,
-   SESSION_PRE_LONDON,
-   SESSION_LONDON,
+   SESSION_PRE_US,
+   SESSION_US_MARKET,
    SESSION_CLOSED
 };
 
@@ -84,7 +86,7 @@ enum SESSION_TYPE {
 //+------------------------------------------------------------------+
 int OnInit() {
    PrintFormat("========================================");
-   PrintFormat("European Indexes Asia-London Range EA v2.0");
+   PrintFormat("US Markets Asia-London Range EA v2.0");
    PrintFormat("========================================");
    
    // Initialize trade object
@@ -110,8 +112,10 @@ int OnInit() {
    
    PrintFormat("Risk Management: %.1f%% per trade (Max: %.2f lots)", RiskPercent, MaxLots);
    PrintFormat("Stop Loss: %.0f%% of Asia range", StopLossPct * 100);
-   PrintFormat("Session Times: Asia %d-%d, London %d-%d (Dubai GMT+4)", 
-               AsiaStartHour, AsiaEndHour, LondonStartHour, LondonEndHour);
+   PrintFormat("US Market Hours: %d:%02d - %d:%02d ET (Close positions at %d:%02d)", 
+               USMarketOpenHour, USMarketOpenMinute, 
+               USMarketCloseHour + 1, 0,
+               USMarketCloseHour, USMarketCloseMinute);
    PrintFormat("========================================");
    
    lastResetDate = TimeCurrent();
@@ -144,12 +148,12 @@ void OnTick() {
          ProcessAsiaSession();
          break;
          
-      case SESSION_PRE_LONDON:
-         ProcessPreLondonSession();
+      case SESSION_PRE_US:
+         ProcessPreUSSession();
          break;
          
-      case SESSION_LONDON:
-         ProcessLondonSession();
+      case SESSION_US_MARKET:
+         ProcessUSMarketSession();
          break;
          
       case SESSION_CLOSED:
@@ -249,18 +253,28 @@ SESSION_TYPE GetCurrentSession() {
    TimeToStruct(TimeCurrent(), dt);
    
    // Convert broker time (GMT+2) to Dubai time (GMT+4)
-   // Broker is 2 hours behind Dubai, so add 2 hours
    int dubaiHour = dt.hour + 2;
    if(dubaiHour >= 24) dubaiHour -= 24;
    
+   // Convert broker time to ET (GMT+2 to ET is -7 hours in DST, -6 in standard)
+   // For simplicity, using -6 hours (standard time)
+   int etHour = dt.hour - 6;
+   if(etHour < 0) etHour += 24;
+   
+   int etMinute = dt.min;
+   
+   // Check if in Asia session (Dubai time)
    if(dubaiHour >= AsiaStartHour && dubaiHour < AsiaEndHour) {
       return SESSION_ASIA;
    }
-   else if(dubaiHour >= AsiaEndHour && dubaiHour < LondonStartHour) {
-      return SESSION_PRE_LONDON;
+   // Check if in US market hours (ET)
+   else if((etHour > USMarketOpenHour || (etHour == USMarketOpenHour && etMinute >= USMarketOpenMinute)) &&
+           (etHour < USMarketCloseHour || (etHour == USMarketCloseHour && etMinute <= USMarketCloseMinute))) {
+      return SESSION_US_MARKET;
    }
-   else if(dubaiHour >= LondonStartHour && dubaiHour < LondonEndHour) {
-      return SESSION_LONDON;
+   // Pre-US session (after Asia, before US market)
+   else if(dubaiHour >= AsiaEndHour && etHour < USMarketOpenHour) {
+      return SESSION_PRE_US;
    }
    else {
       return SESSION_CLOSED;
@@ -287,16 +301,16 @@ void ProcessAsiaSession() {
 }
 
 //+------------------------------------------------------------------+
-//| Process Pre-London session - finalize ranges                     |
+//| Process Pre-US session - finalize ranges                         |
 //+------------------------------------------------------------------+
-void ProcessPreLondonSession() {
+void ProcessPreUSSession() {
    static datetime lastCheck = 0;
    
    // Only check every 5 minutes
    if(TimeCurrent() - lastCheck < 300) return;
    lastCheck = TimeCurrent();
    
-   if(EnableLogging) PrintFormat("=== PRE-LONDON - Finalizing ranges ===");
+   if(EnableLogging) PrintFormat("=== PRE-US MARKET - Finalizing ranges ===");
    
    for(int i = 0; i < symbolCount; i++) {
       if(!asiaRanges[i].identified) {
@@ -306,15 +320,32 @@ void ProcessPreLondonSession() {
 }
 
 //+------------------------------------------------------------------+
-//| Process London session - trade breakouts                         |
+//| Process US Market session - trade breakouts                      |
 //+------------------------------------------------------------------+
-void ProcessLondonSession() {
+void ProcessUSMarketSession() {
    static datetime lastCheck = 0;
    
    // Check every minute
    if(TimeCurrent() - lastCheck < 60) return;
    lastCheck = TimeCurrent();
    
+   // Check if we're approaching market close (close positions at 3:59pm ET)
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   int etHour = dt.hour - 6;
+   if(etHour < 0) etHour += 24;
+   
+   if(etHour == USMarketCloseHour && dt.min >= USMarketCloseMinute) {
+      // Close all positions 1 minute before market close
+      if(EnableLogging) PrintFormat("=== APPROACHING MARKET CLOSE - Closing positions ===");
+      
+      for(int i = 0; i < symbolCount; i++) {
+         CloseAllPositionsForSymbol(tradingSymbols[i], "MARKET_CLOSE");
+      }
+      return;
+   }
+   
+   // Normal trading logic
    for(int i = 0; i < symbolCount; i++) {
       // Skip if already traded today
       if(tradeTracking[i].tradedToday) continue;
@@ -331,14 +362,14 @@ void ProcessLondonSession() {
 }
 
 //+------------------------------------------------------------------+
-//| Process closed session - close positions                         |
+//| Process closed session                                           |
 //+------------------------------------------------------------------+
 void ProcessClosedSession() {
    static bool closedToday = false;
    
    // Close all positions once when session closes
    if(!closedToday) {
-      if(EnableLogging) PrintFormat("=== LONDON SESSION ENDED - Closing positions ===");
+      if(EnableLogging) PrintFormat("=== US MARKET CLOSED - Closing positions ===");
       
       for(int i = 0; i < symbolCount; i++) {
          CloseAllPositionsForSymbol(tradingSymbols[i], "TIME_EXIT");
@@ -557,10 +588,10 @@ void PlaceOrder(int symbolIndex, string direction, double entryPrice) {
    bool result = false;
    
    if(direction == "LONG") {
-      result = trade.Buy(lots, symbol, entryPrice, stopLoss, takeProfit, "Asia-London Range");
+      result = trade.Buy(lots, symbol, entryPrice, stopLoss, takeProfit, "US Market Range");
    }
    else {
-      result = trade.Sell(lots, symbol, entryPrice, stopLoss, takeProfit, "Asia-London Range");
+      result = trade.Sell(lots, symbol, entryPrice, stopLoss, takeProfit, "US Market Range");
    }
    
    if(result) {
