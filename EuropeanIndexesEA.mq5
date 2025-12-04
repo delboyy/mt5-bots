@@ -335,6 +335,22 @@ void ProcessLondonSession() {
 //+------------------------------------------------------------------+
 void ProcessClosedSession() {
    static bool closedToday = false;
+   static int lastResetDay = -1;
+   
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   
+   // Reset flag once per day when entering Asia session
+   if(dt.day != lastResetDay) {
+      int dubaiHour = dt.hour + 2;  // Broker GMT+2 to Dubai GMT+4
+      if(dubaiHour >= 24) dubaiHour -= 24;
+      
+      // Only reset if we're in or past Asia session
+      if(dubaiHour >= AsiaStartHour) {
+         closedToday = false;
+         lastResetDay = dt.day;
+      }
+   }
    
    // Close all positions once when session closes
    if(!closedToday) {
@@ -345,16 +361,6 @@ void ProcessClosedSession() {
       }
       
       closedToday = true;
-   }
-   
-   // Reset flag at start of new day
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   int dubaiHour = dt.hour + 2;  // Broker GMT+2 to Dubai GMT+4
-   if(dubaiHour >= 24) dubaiHour -= 24;
-   
-   if(dubaiHour >= AsiaStartHour) {
-      closedToday = false;
    }
 }
 
