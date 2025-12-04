@@ -1,0 +1,52 @@
+{
+    "bot_name": "European Indexes MT5 Bot",
+    "version": "1.0.0",
+    "symbols": {
+        "default": [
+            "GER40",
+            "FRA40",
+            "UK100",
+            "EUSTX50"
+        ],
+        "note": "Adjust these to match your broker's symbol names"
+    },
+    "trading_parameters": {
+        "stop_loss_pct": 1.5,
+        "max_risk_per_trade": 0.02,
+        "max_daily_risk": 0.05,
+        "lot_size": 0.01
+    },
+    "session_times_dubai": {
+        "asia_start_hour": 5,
+        "asia_end_hour": 9,
+        "london_start_hour": 11,
+        "london_end_hour": 14
+    },
+    "logging": {
+        "log_file": "logs/european_indexes_mt5.log",
+        "state_file": "state/european_indexes_mt5_state.json",
+        "log_level": "INFO"
+    },
+    "symbol_variations": {
+        "DAX": [
+            "GER40",
+            "GER30",
+            "DE40",
+            "DAX40"
+        ],
+        "CAC40": [
+            "FRA40",
+            "FR40",
+            "CAC40"
+        ],
+        "FTSE": [
+            "UK100",
+            "FTSE100"
+        ],
+        "EURO_STOXX": [
+            "EUSTX50",
+            "EU50",
+            "STOXX50"
+        ]
+    }
+}
