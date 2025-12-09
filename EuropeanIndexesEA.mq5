@@ -29,8 +29,8 @@ input string Symbol4 = "EUSTX50";         // Symbol 4 (Euro STOXX)
 input group "=== SESSION TIMES (Dubai GMT+4) ==="
 input int AsiaStartHour = 5;              // Asia Session Start Hour (Dubai)
 input int AsiaEndHour = 9;                // Asia Session End Hour (Dubai)
-input int LondonStartHour = 11;           // London Session Start Hour (Dubai)
-input int LondonEndHour = 17;             // London Session End Hour (Dubai) - Extended to 5pm
+input int LondonStartHour = 9;            // London Session Start Hour (Dubai) - Starts immediately after Asia
+input int LondonEndHour = 25;             // London Session End Hour (Dubai) - Extended to 1am (US Close)
 
 input group "=== RISK MANAGEMENT ==="
 input double RiskPercent = 1.0;           // Risk % Per Trade
@@ -244,6 +244,9 @@ void CheckDailyReset() {
 //+------------------------------------------------------------------+
 //| Get current trading session                                      |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Get current trading session                                      |
+//+------------------------------------------------------------------+
 SESSION_TYPE GetCurrentSession() {
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
@@ -253,250 +256,43 @@ SESSION_TYPE GetCurrentSession() {
    int dubaiHour = dt.hour + 2;
    if(dubaiHour >= 24) dubaiHour -= 24;
    
+   // Handle extended session logic (LondonEndHour > 24)
+   int checkHour = dubaiHour;
+   if(checkHour < AsiaStartHour) checkHour += 24; // Handle midnight wrap for end check
+   
    if(dubaiHour >= AsiaStartHour && dubaiHour < AsiaEndHour) {
       return SESSION_ASIA;
    }
+   // Combined trading session (Asia End -> US Close)
+   else if(checkHour >= LondonStartHour && checkHour < LondonEndHour) {
+      return SESSION_LONDON;
+   }
+   // If strictly between AsiaEnd and LondonStart (only if gap exists)
    else if(dubaiHour >= AsiaEndHour && dubaiHour < LondonStartHour) {
       return SESSION_PRE_LONDON;
-   }
-   else if(dubaiHour >= LondonStartHour && dubaiHour < LondonEndHour) {
-      return SESSION_LONDON;
    }
    else {
       return SESSION_CLOSED;
    }
 }
 
-//+------------------------------------------------------------------+
-//| Process Asia session - identify ranges                           |
-//+------------------------------------------------------------------+
-void ProcessAsiaSession() {
-   static datetime lastCheck = 0;
-   
-   // Only check every 5 minutes
-   if(TimeCurrent() - lastCheck < 300) return;
-   lastCheck = TimeCurrent();
-   
-   if(EnableLogging) PrintFormat("=== ASIA SESSION - Monitoring ranges ===");
-   
-   for(int i = 0; i < symbolCount; i++) {
-      if(!asiaRanges[i].identified) {
-         CalculateAsiaRange(i);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Process Pre-London session - finalize ranges                     |
-//+------------------------------------------------------------------+
-void ProcessPreLondonSession() {
-   static datetime lastCheck = 0;
-   
-   // Only check every 5 minutes
-   if(TimeCurrent() - lastCheck < 300) return;
-   lastCheck = TimeCurrent();
-   
-   if(EnableLogging) PrintFormat("=== PRE-LONDON - Finalizing ranges ===");
-   
-   for(int i = 0; i < symbolCount; i++) {
-      if(!asiaRanges[i].identified) {
-         CalculateAsiaRange(i);
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Process London session - trade breakouts                         |
-//+------------------------------------------------------------------+
-void ProcessLondonSession() {
-   static datetime lastCheck = 0;
-   
-   // Check every minute
-   if(TimeCurrent() - lastCheck < 60) return;
-   lastCheck = TimeCurrent();
-   
-   for(int i = 0; i < symbolCount; i++) {
-      // Skip if already traded today
-      if(tradeTracking[i].tradedToday) continue;
-      
-      // Skip if range not identified
-      if(!asiaRanges[i].identified) continue;
-      
-      // Skip if already have open position
-      if(CountOpenPositionsForSymbol(tradingSymbols[i]) > 0) continue;
-      
-      // Check for entry signal
-      CheckForEntrySignal(i);
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Process closed session - close positions                         |
-//+------------------------------------------------------------------+
-void ProcessClosedSession() {
-   static bool closedToday = false;
-   static int lastResetDay = -1;
-   
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   
-   // Reset flag once per day when entering Asia session
-   if(dt.day != lastResetDay) {
-      int dubaiHour = dt.hour + 2;  // Broker GMT+2 to Dubai GMT+4
-      if(dubaiHour >= 24) dubaiHour -= 24;
-      
-      // Only reset if we're in or past Asia session
-      if(dubaiHour >= AsiaStartHour) {
-         closedToday = false;
-         lastResetDay = dt.day;
-      }
-   }
-   
-   // Close all positions once when session closes
-   if(!closedToday) {
-      if(EnableLogging) PrintFormat("=== LONDON SESSION ENDED - Closing positions ===");
-      
-      for(int i = 0; i < symbolCount; i++) {
-         CloseAllPositionsForSymbol(tradingSymbols[i], "TIME_EXIT");
-      }
-      
-      closedToday = true;
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Calculate Asia session range for a symbol                        |
-//+------------------------------------------------------------------+
-void CalculateAsiaRange(int symbolIndex) {
-   string symbol = tradingSymbols[symbolIndex];
-   
-   // Get current time
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   
-   // Calculate Asia session start/end times (convert Dubai to broker time GMT+2)
-   datetime asiaStart = StringToTime(StringFormat("%04d.%02d.%02d %02d:00", 
-                                      dt.year, dt.mon, dt.day, AsiaStartHour - 2));
-   datetime asiaEnd = StringToTime(StringFormat("%04d.%02d.%02d %02d:00", 
-                                    dt.year, dt.mon, dt.day, AsiaEndHour - 2));
-   
-   // Get M5 bars for Asia session
-   MqlRates rates[];
-   ArraySetAsSeries(rates, true);
-   
-   int copied = CopyRates(symbol, PERIOD_M5, asiaStart, asiaEnd, rates);
-   
-   if(copied < 3) {
-      if(EnableLogging) PrintFormat("%s: Insufficient Asia data (%d bars)", symbol, copied);
-      return;
-   }
-   
-   // Find high and low
-   double high = rates[0].high;
-   double low = rates[0].low;
-   
-   for(int i = 1; i < copied; i++) {
-      if(rates[i].high > high) high = rates[i].high;
-      if(rates[i].low < low) low = rates[i].low;
-   }
-   
-   double rangeSize = high - low;
-   
-   // Validate range (minimum 5 points)
-   double minRange = 5.0 * SymbolInfoDouble(symbol, SYMBOL_POINT);
-   if(rangeSize < minRange) {
-      if(EnableLogging) PrintFormat("%s: Range too small (%.5f)", symbol, rangeSize);
-      return;
-   }
-   
-   // Store range
-   asiaRanges[symbolIndex].date = TimeCurrent();
-   asiaRanges[symbolIndex].high = high;
-   asiaRanges[symbolIndex].low = low;
-   asiaRanges[symbolIndex].size = rangeSize;
-   asiaRanges[symbolIndex].identified = true;
-   
-   if(EnableLogging) {
-      PrintFormat("✓ %s Asia Range: %.5f - %.5f (Size: %.5f)", 
-                  symbol, low, high, rangeSize);
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Check for entry signal and place order                           |
-//+------------------------------------------------------------------+
-void CheckForEntrySignal(int symbolIndex) {
-   string symbol = tradingSymbols[symbolIndex];
-   
-   // Get current price
-   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
-   
-   AsiaRange range = asiaRanges[symbolIndex];
-   
-   string direction = "";
-   double entryPrice = 0;
-   
-   // Check for breakout ABOVE (fade with SHORT)
-   if(bid > range.high) {
-      direction = "SHORT";
-      entryPrice = bid;
-      
-      if(EnableLogging) {
-         PrintFormat("%s breakout ABOVE: %.5f > %.5f - Going SHORT", 
-                     symbol, bid, range.high);
-      }
-   }
-   // Check for breakout BELOW (fade with LONG)
-   else if(ask < range.low) {
-      direction = "LONG";
-      entryPrice = ask;
-      
-      if(EnableLogging) {
-         PrintFormat("%s breakout BELOW: %.5f < %.5f - Going LONG", 
-                     symbol, ask, range.low);
-      }
-   }
-   
-   // Place order if breakout detected
-   if(direction != "") {
-      PlaceOrder(symbolIndex, direction, entryPrice);
-   }
-}
-
-//+------------------------------------------------------------------+
-//| Calculate SL and TP levels                                       |
-//+------------------------------------------------------------------+
-void CalculateSLTP(string symbol, string direction, double entryPrice, 
-                   AsiaRange &range, double &stopLoss, double &takeProfit) {
-   
-   if(direction == "LONG") {
-      takeProfit = range.high;
-      stopLoss = entryPrice - (range.size * StopLossPct);
-   }
-   else { // SHORT
-      takeProfit = range.low;
-      stopLoss = entryPrice + (range.size * StopLossPct);
-   }
-   
-   // Normalize prices
-   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-   stopLoss = NormalizeDouble(stopLoss, digits);
-   takeProfit = NormalizeDouble(takeProfit, digits);
-}
+// ... existing code ...
 
 //+------------------------------------------------------------------+
 //| Calculate lot size based on risk percentage                      |
 //+------------------------------------------------------------------+
 double CalculateLotSizeBasedOnRisk(string symbol, double entryPrice, double stopLoss) {
-   // Calculate SL distance in points
-   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   double slPoints = MathAbs(entryPrice - stopLoss) / point;
+   // Calculate Price Distance
+   double distance = MathAbs(entryPrice - stopLoss);
+   double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
    
-   if(slPoints <= 0) {
-      PrintFormat("ERROR: Invalid SL distance for %s", symbol);
+   if(distance <= 0 || tickSize <= 0) {
+      PrintFormat("ERROR: Invalid properties for %s (Dist: %.5f, TickSize: %.5f)", symbol, distance, tickSize);
       return 0;
    }
+   
+   // Calculate steps (ticks)
+   double steps = distance / tickSize;
    
    // Get tick value
    double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -509,8 +305,10 @@ double CalculateLotSizeBasedOnRisk(string symbol, double entryPrice, double stop
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    double riskMoney = balance * (RiskPercent / 100.0);
    
-   // Calculate lot size
-   double lots = riskMoney / (slPoints * tickValue);
+   // Calculate lot size: Risk = Lots * Steps * TickValue
+   // Thus: Lots = Risk / (Steps * TickValue)
+   double lots = riskMoney / (steps * tickValue);
+
    
    // Get volume step and limits
    double volumeStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);

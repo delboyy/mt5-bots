@@ -520,14 +520,17 @@ void CalculateSLTP(string symbol, string direction, double entryPrice,
 //| Calculate lot size based on risk percentage                      |
 //+------------------------------------------------------------------+
 double CalculateLotSizeBasedOnRisk(string symbol, double entryPrice, double stopLoss) {
-   // Calculate SL distance in points
-   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   double slPoints = MathAbs(entryPrice - stopLoss) / point;
+   // Calculate Price Distance
+   double distance = MathAbs(entryPrice - stopLoss);
+   double tickSize = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
    
-   if(slPoints <= 0) {
-      PrintFormat("ERROR: Invalid SL distance for %s", symbol);
+   if(distance <= 0 || tickSize <= 0) {
+      PrintFormat("ERROR: Invalid properties for %s (Dist: %.5f, TickSize: %.5f)", symbol, distance, tickSize);
       return 0;
    }
+   
+   // Calculate steps (ticks)
+   double steps = distance / tickSize;
    
    // Get tick value
    double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -540,8 +543,9 @@ double CalculateLotSizeBasedOnRisk(string symbol, double entryPrice, double stop
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    double riskMoney = balance * (RiskPercent / 100.0);
    
-   // Calculate lot size
-   double lots = riskMoney / (slPoints * tickValue);
+   // Calculate lot size: Risk = Lots * Steps * TickValue
+   // Thus: Lots = Risk / (Steps * TickValue)
+   double lots = riskMoney / (steps * tickValue);
    
    // Get volume step and limits
    double volumeStep = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
